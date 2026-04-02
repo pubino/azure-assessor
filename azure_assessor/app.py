@@ -55,7 +55,6 @@ Screen {
 
 #input-panel {
     height: auto;
-    max-height: 9;
     padding: 0 1;
     background: $surface-darken-1;
     border: round $primary;
@@ -63,11 +62,10 @@ Screen {
 }
 
 #input-panel Label {
-    width: auto;
-    min-width: 8;
-    height: 3;
+    width: 8;
+    height: 1;
     content-align: right middle;
-    margin: 0 1 0 0;
+    margin: 1 1 0 0;
 }
 
 .input-row {
@@ -78,8 +76,13 @@ Screen {
     width: 1fr;
 }
 
-.input-row Button {
-    margin: 0 0 0 1;
+.button-row {
+    height: 3;
+    align: center middle;
+}
+
+.button-row Button {
+    margin: 0 1;
 }
 
 #results-panel {
@@ -198,11 +201,13 @@ class AzureAssessorApp(App):
                 with Horizontal(classes="input-row"):
                     yield Label("Region:")
                     yield Input(placeholder="eastus", id="region-input")
+                with Horizontal(classes="input-row"):
                     yield Label("SKU:")
                     yield Input(placeholder="Standard_D4s_v3", id="sku-input")
                 with Horizontal(classes="input-row"):
                     yield Label("Image:")
                     yield Input(placeholder="publisher:offer:sku (optional)", id="image-input")
+                with Horizontal(classes="button-row"):
                     yield Button("Assess", variant="primary", id="btn-assess")
                     yield Button("Quota", variant="warning", id="btn-quota")
                     yield Button("Export", variant="success", id="btn-export")

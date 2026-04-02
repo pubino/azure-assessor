@@ -25,6 +25,22 @@ class AzureClient:
         )
 
     def _get_default_subscription(self) -> str:
+        # Fast path: read from az cli config (no network call)
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["az", "account", "show", "--query", "id", "-o", "tsv"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Fallback: enumerate via SDK
         sub_client = SubscriptionClient(self.credential)
         for sub in sub_client.subscriptions.list():
             if sub.state == "Enabled":

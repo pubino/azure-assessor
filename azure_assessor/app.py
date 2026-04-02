@@ -231,19 +231,13 @@ class AzureAssessorApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Initialize data tables and Azure clients."""
-        if self._azure_client is None:
-            try:
-                from azure_assessor.azure_client import AzureClient
-                self._azure_client = AzureClient()
-                self.notify("Connected to Azure", severity="information")
-            except Exception as e:
-                self._init_error = str(e)
-                self.notify(f"Azure connection failed: {e}", severity="error")
-
+        """Initialize data tables and kick off Azure client init."""
         if self._pricing_client is None:
             from azure_assessor.pricing import PricingClient
             self._pricing_client = PricingClient()
+
+        if self._azure_client is None:
+            self._init_azure_client()
 
         avail_table = self.query_one("#table-avail", DataTable)
         avail_table.add_columns("SKU", "Region", "Available", "Zones", "Restrictions")
@@ -259,6 +253,24 @@ class AzureAssessorApp(App):
 
         img_table = self.query_one("#table-images", DataTable)
         img_table.add_columns("Publisher", "Offer", "SKU", "Version", "OS", "Arch", "HyperV Gen", "Compatible")
+
+    @work(thread=True)
+    def _init_azure_client(self) -> None:
+        """Initialize Azure client in a background thread."""
+        try:
+            from azure_assessor.azure_client import AzureClient
+            client = AzureClient()
+            self._azure_client = client
+            self.call_from_thread(
+                self.notify,
+                f"Connected to Azure (subscription {client.subscription_id[:8]}...)",
+                severity="information",
+            )
+        except Exception as e:
+            self._init_error = str(e)
+            self.call_from_thread(
+                self.notify, f"Azure connection failed: {e}", severity="error"
+            )
 
     @on(Button.Pressed, "#btn-assess")
     def on_assess_pressed(self) -> None:

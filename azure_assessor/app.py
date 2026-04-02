@@ -225,6 +225,7 @@ class AzureAssessorApp(App):
         self._advisor = SkuAdvisor()
         self._results: list[AssessmentResult] = []
         self._current_skus: list[VmSku] = []
+        self._init_error: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -274,7 +275,20 @@ class AzureAssessorApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Initialize data tables."""
+        """Initialize data tables and Azure clients."""
+        if self._azure_client is None:
+            try:
+                from azure_assessor.azure_client import AzureClient
+                self._azure_client = AzureClient()
+                self.notify("Connected to Azure", severity="information")
+            except Exception as e:
+                self._init_error = str(e)
+                self.notify(f"Azure connection failed: {e}", severity="error")
+
+        if self._pricing_client is None:
+            from azure_assessor.pricing import PricingClient
+            self._pricing_client = PricingClient()
+
         avail_table = self.query_one("#table-avail", DataTable)
         avail_table.add_columns("SKU", "Region", "Available", "Zones", "Restrictions")
 

@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "azure-assessor"
 version = "0.1.0"
 description = "Interactive TUI for Azure VM SKU assessment, pricing, and fleet planning"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "textual>=0.85.0",

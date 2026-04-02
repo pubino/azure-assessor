@@ -1,0 +1,7 @@
+services:
+  test:
+    build: .
+    command: pytest -v --tb=short -x
+    volumes:
+      - ./azure_assessor:/app/azure_assessor:ro
+      - ./tests:/app/tests:ro

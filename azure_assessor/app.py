@@ -37,7 +37,6 @@ from azure_assessor.models import (
     VmSku,
 )
 
-# Color scheme
 STYLE_CSS = """
 Screen {
     background: $surface;
@@ -47,53 +46,34 @@ Screen {
     height: 100%;
 }
 
-.title-bar {
-    dock: top;
-    height: 3;
-    background: $primary;
-    color: $text;
-    content-align: center middle;
-    text-style: bold;
-}
-
 .section-title {
     color: $accent;
     text-style: bold;
-    margin: 1 0 0 1;
-}
-
-.status-bar {
-    dock: bottom;
+    margin: 0 0 0 1;
     height: 1;
-    background: $primary-darken-2;
-    color: $text;
-    padding: 0 1;
 }
 
 #input-panel {
     height: auto;
-    max-height: 12;
-    padding: 1;
+    max-height: 10;
+    padding: 0 1;
     background: $surface-darken-1;
     border: round $primary;
-    margin: 1;
+    margin: 1 1 0 1;
 }
 
 #input-panel Label {
+    width: 8;
+    height: 1;
+    content-align: right middle;
     margin: 0 1 0 0;
-    width: auto;
 }
 
 .input-row {
     height: 3;
-    margin: 0 0 1 0;
 }
 
 .input-row Input {
-    width: 1fr;
-}
-
-.input-row Select {
     width: 1fr;
 }
 
@@ -108,7 +88,7 @@ Screen {
 
 #results-panel {
     height: 1fr;
-    margin: 0 1 1 1;
+    margin: 0 1 0 1;
 }
 
 DataTable {
@@ -125,25 +105,13 @@ DataTable {
     display: block;
 }
 
-.score-high {
-    color: $success;
-}
-
-.score-medium {
-    color: $warning;
-}
-
-.score-low {
-    color: $error;
-}
-
 ExportScreen {
     align: center middle;
 }
 
 #export-dialog {
     width: 60;
-    height: 20;
+    height: 18;
     padding: 1 2;
     background: $surface;
     border: round $primary;
@@ -231,28 +199,16 @@ class AzureAssessorApp(App):
         yield Header(show_clock=True)
         with Container(id="main-container"):
             with Container(id="input-panel"):
-                yield Label("Azure VM SKU Assessor", classes="section-title")
                 with Horizontal(classes="input-row"):
                     yield Label("Region:")
-                    yield Input(
-                        placeholder="e.g., eastus, westus2, westeurope",
-                        id="region-input",
-                    )
-                with Horizontal(classes="input-row"):
+                    yield Input(placeholder="eastus", id="region-input")
                     yield Label("SKU:")
-                    yield Input(
-                        placeholder="e.g., Standard_D4s_v3, Standard_E8s_v5",
-                        id="sku-input",
-                    )
-                with Horizontal(classes="input-row"):
+                    yield Input(placeholder="Standard_D4s_v3", id="sku-input")
                     yield Label("Image:")
-                    yield Input(
-                        placeholder="publisher:offer:sku (e.g., Canonical:0001-com-ubuntu-server-jammy:22_04-lts)",
-                        id="image-input",
-                    )
+                    yield Input(placeholder="publisher:offer:sku", id="image-input")
                 with Horizontal(classes="button-row"):
                     yield Button("Assess", variant="primary", id="btn-assess")
-                    yield Button("Check Quota", variant="warning", id="btn-quota")
+                    yield Button("Quota", variant="warning", id="btn-quota")
                     yield Button("Export", variant="success", id="btn-export")
                     yield Button("Clear", variant="error", id="btn-clear")
 

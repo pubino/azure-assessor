@@ -9,6 +9,7 @@ from azure_assessor.models import (
     ImageInfo,
     PriceInfo,
     QuotaInfo,
+    ServiceCostEstimate,
     SkuAvailability,
     SkuRecommendation,
     VmSku,
@@ -216,6 +217,48 @@ def sample_image_arm() -> ImageInfo:
         os_type="Linux",
         hyper_v_generation="V2",
     )
+
+
+@pytest.fixture
+def sample_cost_estimates() -> list[ServiceCostEstimate]:
+    return [
+        ServiceCostEstimate(
+            service_name="Virtual Machines",
+            tier="Standard_D4s_v3",
+            monthly_cost=140.16,
+            hourly_cost=0.192,
+            vcpus=4,
+            memory_gb=16.0,
+            spot_monthly=27.74,
+            notes=["Baseline VM cost"],
+        ),
+        ServiceCostEstimate(
+            service_name="Container Apps",
+            tier="Consumption",
+            monthly_cost=105.12,
+            hourly_cost=0.144,
+            vcpus=4,
+            memory_gb=16.0,
+            notes=["vCPU rate: $0.000012/s", "Mem rate: $0.0000012/GiB-s"],
+        ),
+        ServiceCostEstimate(
+            service_name="AKS",
+            tier="Standard + Standard_D4s_v3",
+            monthly_cost=147.46,
+            hourly_cost=0.202,
+            spot_monthly=35.04,
+            notes=["Mgmt fee: $0.0100/hr", "Node VM: Standard_D4s_v3"],
+        ),
+        ServiceCostEstimate(
+            service_name="App Service",
+            tier="P2v3",
+            monthly_cost=175.20,
+            hourly_cost=0.240,
+            vcpus=4,
+            memory_gb=16.0,
+            notes=["Plan: P2v3", "Meter: P2 v3"],
+        ),
+    ]
 
 
 @pytest.fixture

@@ -32,6 +32,7 @@ from azure_assessor.models import (
     AssessmentResult,
     PriceInfo,
     QuotaInfo,
+    ServiceCostEstimate,
     SkuAvailability,
     SkuRecommendation,
     VmSku,
@@ -228,6 +229,8 @@ class AzureAssessorApp(App):
                     yield DataTable(id="table-alt")
                 with TabPane("Image Compat", id="tab-images"):
                     yield DataTable(id="table-images")
+                with TabPane("Cost Compare", id="tab-costs"):
+                    yield DataTable(id="table-costs")
 
         yield Footer()
 
@@ -254,6 +257,12 @@ class AzureAssessorApp(App):
 
         img_table = self.query_one("#table-images", DataTable)
         img_table.add_columns("Publisher", "Offer", "SKU", "Version", "OS", "Arch", "HyperV Gen", "Compatible")
+
+        cost_table = self.query_one("#table-costs", DataTable)
+        cost_table.add_columns(
+            "Service", "Tier/Plan", "vCPUs", "Memory (GB)",
+            "Monthly Cost", "Spot Monthly", "vs VM", "Notes",
+        )
 
     @work(thread=True)
     def _init_azure_client(self) -> None:
@@ -384,6 +393,17 @@ class AzureAssessorApp(App):
                     max_results=10,
                 )
 
+            # Cost comparison across services
+            if self._pricing_client and target_sku_obj:
+                try:
+                    result.cost_comparison = self._pricing_client.estimate_monthly_costs(
+                        sku_name, region,
+                        vcpus=target_sku_obj.vcpus,
+                        memory_gb=target_sku_obj.memory_gb,
+                    )
+                except Exception:
+                    pass  # non-critical, don't block assessment
+
             # Check image compatibility
             image_input = self.call_from_thread(self._get_image_input)
             if image_input and target_sku_obj:
@@ -455,7 +475,7 @@ class AzureAssessorApp(App):
 
     def _clear_results(self) -> None:
         self._results.clear()
-        for table_id in ["#table-avail", "#table-quota", "#table-pricing", "#table-alt", "#table-images"]:
+        for table_id in ["#table-avail", "#table-quota", "#table-pricing", "#table-alt", "#table-images", "#table-costs"]:
             try:
                 table = self.query_one(table_id, DataTable)
                 table.clear()
@@ -514,6 +534,36 @@ class AzureAssessorApp(App):
                 img.publisher, img.offer, img.sku, img.version,
                 img.os_type, img.architecture, img.hyper_v_generation,
                 "[green]Yes[/]",
+            )
+
+        # Cost comparison table
+        cost_table = self.query_one("#table-costs", DataTable)
+        vm_monthly = None
+        for est in result.cost_comparison:
+            if est.service_name == "Virtual Machines":
+                vm_monthly = est.monthly_cost
+                break
+
+        for est in result.cost_comparison:
+            spot_str = f"${est.spot_monthly:,.2f}" if est.spot_monthly is not None else "N/A"
+            if vm_monthly and est.service_name != "Virtual Machines" and vm_monthly > 0:
+                diff_pct = ((est.monthly_cost - vm_monthly) / vm_monthly) * 100
+                if diff_pct < 0:
+                    vs_vm = f"[green]{diff_pct:+.1f}%[/]"
+                else:
+                    vs_vm = f"[red]+{diff_pct:.1f}%[/]"
+            else:
+                vs_vm = "baseline" if est.service_name == "Virtual Machines" else "N/A"
+
+            cost_table.add_row(
+                est.service_name,
+                est.tier,
+                str(est.vcpus) if est.vcpus else "—",
+                f"{est.memory_gb:.1f}" if est.memory_gb else "—",
+                f"${est.monthly_cost:,.2f}",
+                spot_str,
+                vs_vm,
+                "; ".join(est.notes[:2]),
             )
 
     def _update_quota_table(self, quotas: list[QuotaInfo]) -> None:

@@ -39,6 +39,24 @@ def _flatten_result(result: AssessmentResult) -> dict:
         row["spot_price_hourly"] = result.spot_pricing.retail_price
     row["num_alternatives"] = len(result.alternatives)
     row["num_compatible_images"] = len(result.compatible_images)
+
+    # Cost comparison summary
+    if result.cost_comparison:
+        vm_cost = next(
+            (e.monthly_cost for e in result.cost_comparison if e.service_name == "Virtual Machines"),
+            None,
+        )
+        cheapest = min(result.cost_comparison, key=lambda e: e.monthly_cost)
+        row["cheapest_service"] = cheapest.service_name
+        row["cheapest_tier"] = cheapest.tier
+        row["cheapest_monthly"] = cheapest.monthly_cost
+        if vm_cost and vm_cost > 0 and cheapest.service_name != "Virtual Machines":
+            row["savings_vs_vm_pct"] = round(
+                ((vm_cost - cheapest.monthly_cost) / vm_cost) * 100, 1
+            )
+        else:
+            row["savings_vs_vm_pct"] = 0.0
+
     return row
 
 
@@ -96,6 +114,10 @@ def export_excel(results: list[AssessmentResult], path: Path) -> None:
     # Images sheet
     ws_img = wb.create_sheet("Compatible Images")
     _write_images_sheet(ws_img, results)
+
+    # Cost Comparison sheet
+    ws_cost = wb.create_sheet("Cost Comparison")
+    _write_cost_comparison_sheet(ws_cost, results)
 
     wb.save(str(path))
 
@@ -197,3 +219,49 @@ def _write_images_sheet(ws, results: list[AssessmentResult]) -> None:
             ws.cell(row=row_idx, column=8, value=img.architecture)
             ws.cell(row=row_idx, column=9, value=img.hyper_v_generation)
             row_idx += 1
+
+
+def _write_cost_comparison_sheet(ws, results: list[AssessmentResult]) -> None:
+    """Write the cost comparison sheet."""
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="7030A0", end_color="7030A0", fill_type="solid")
+
+    headers = [
+        "Target SKU", "Region", "Service", "Tier/Plan",
+        "vCPUs", "Memory (GB)", "Hourly Cost", "Monthly Cost",
+        "Spot Monthly", "vs VM %", "Notes",
+    ]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    row_idx = 2
+    for result in results:
+        vm_monthly = next(
+            (e.monthly_cost for e in result.cost_comparison if e.service_name == "Virtual Machines"),
+            None,
+        )
+        for est in result.cost_comparison:
+            ws.cell(row=row_idx, column=1, value=result.target_sku)
+            ws.cell(row=row_idx, column=2, value=result.region)
+            ws.cell(row=row_idx, column=3, value=est.service_name)
+            ws.cell(row=row_idx, column=4, value=est.tier)
+            ws.cell(row=row_idx, column=5, value=est.vcpus if est.vcpus else "")
+            ws.cell(row=row_idx, column=6, value=est.memory_gb if est.memory_gb else "")
+            ws.cell(row=row_idx, column=7, value=est.hourly_cost)
+            ws.cell(row=row_idx, column=8, value=est.monthly_cost)
+            ws.cell(row=row_idx, column=9, value=est.spot_monthly if est.spot_monthly is not None else "")
+            if vm_monthly and vm_monthly > 0 and est.service_name != "Virtual Machines":
+                vs_vm = round(((est.monthly_cost - vm_monthly) / vm_monthly) * 100, 1)
+                ws.cell(row=row_idx, column=10, value=vs_vm)
+            else:
+                ws.cell(row=row_idx, column=10, value="baseline" if est.service_name == "Virtual Machines" else "")
+            ws.cell(row=row_idx, column=11, value="; ".join(est.notes))
+            row_idx += 1
+
+    # Auto-width columns
+    for col in ws.columns:
+        max_length = max(len(str(cell.value or "")) for cell in col)
+        ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 40)

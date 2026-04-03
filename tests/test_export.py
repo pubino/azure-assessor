@@ -21,6 +21,7 @@ from azure_assessor.models import (
     ImageInfo,
     PriceInfo,
     QuotaInfo,
+    ServiceCostEstimate,
     SkuAvailability,
     SkuRecommendation,
     VmSku,
@@ -67,6 +68,27 @@ def rich_result() -> AssessmentResult:
                 offer="0001-com-ubuntu-server-jammy",
                 sku="22_04-lts",
                 version="22.04.202401010",
+            ),
+        ],
+        cost_comparison=[
+            ServiceCostEstimate(
+                service_name="Virtual Machines",
+                tier="Standard_D4s_v3",
+                monthly_cost=140.16,
+                hourly_cost=0.192,
+                vcpus=4,
+                memory_gb=16.0,
+                spot_monthly=27.74,
+                notes=["Baseline VM cost"],
+            ),
+            ServiceCostEstimate(
+                service_name="Container Apps",
+                tier="Consumption",
+                monthly_cost=105.12,
+                hourly_cost=0.144,
+                vcpus=4,
+                memory_gb=16.0,
+                notes=["vCPU rate: $0.000012/s"],
             ),
         ],
         timestamp="2026-04-02T12:00:00+00:00",
@@ -142,6 +164,7 @@ class TestExcelExport:
         assert "Summary" in wb.sheetnames
         assert "Alternatives" in wb.sheetnames
         assert "Compatible Images" in wb.sheetnames
+        assert "Cost Comparison" in wb.sheetnames
 
     def test_excel_summary_data(self, rich_result, tmp_path):
         from openpyxl import load_workbook
@@ -171,10 +194,37 @@ class TestExcelExport:
         ws = wb["Compatible Images"]
         assert ws.cell(row=2, column=3).value == "Canonical"
 
+    def test_excel_cost_comparison_data(self, rich_result, tmp_path):
+        from openpyxl import load_workbook
+        path = tmp_path / "test.xlsx"
+        export_excel([rich_result], path)
+        wb = load_workbook(str(path))
+        ws = wb["Cost Comparison"]
+        # Row 1 is header, Row 2 = VM, Row 3 = Container Apps
+        assert ws.cell(row=2, column=3).value == "Virtual Machines"
+        assert ws.cell(row=2, column=8).value == 140.16
+        assert ws.cell(row=3, column=3).value == "Container Apps"
+        assert ws.cell(row=3, column=8).value == 105.12
+
     def test_export_empty_excel(self, tmp_path):
         path = tmp_path / "empty.xlsx"
         export_excel([], path)
         assert path.exists()
+
+
+class TestCostComparisonFlatten:
+    def test_flatten_includes_cheapest(self, rich_result):
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(rich_result)
+        assert flat["cheapest_service"] == "Container Apps"
+        assert flat["cheapest_monthly"] == 105.12
+        assert flat["savings_vs_vm_pct"] > 0
+
+    def test_flatten_no_cost_comparison(self):
+        from azure_assessor.export import _flatten_result
+        result = AssessmentResult(target_sku="Standard_D4s_v3", region="eastus")
+        flat = _flatten_result(result)
+        assert "cheapest_service" not in flat
 
 
 class TestMultipleResults:

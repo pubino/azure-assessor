@@ -30,6 +30,7 @@ from azure_assessor.advisor import SkuAdvisor
 from azure_assessor.export import export_csv, export_excel, export_json
 from azure_assessor.models import (
     AssessmentResult,
+    ImageInfo,
     PriceInfo,
     QuotaInfo,
     ServiceCostEstimate,
@@ -130,7 +131,151 @@ ExportScreen {
     align: center middle;
     margin: 1 0;
 }
+
+DetailScreen {
+    align: center middle;
+}
+
+#detail-dialog {
+    width: 70;
+    height: 80%;
+    max-height: 40;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#detail-dialog Label.section-title {
+    margin: 0 0 1 0;
+}
+
+#detail-body {
+    height: 1fr;
+}
+
+#detail-body .detail-field {
+    margin: 0 0 0 1;
+}
+
+.detail-buttons {
+    height: 3;
+    align: center middle;
+    dock: bottom;
+}
 """
+
+
+def _detail_fields_availability(obj: SkuAvailability) -> tuple[str, list[tuple[str, str]]]:
+    return (
+        f"Availability — {obj.sku_name}",
+        [
+            ("SKU Name", obj.sku_name),
+            ("Region", obj.region),
+            ("Available", "Yes" if obj.available else "No"),
+            ("Zones", ", ".join(obj.zones) if obj.zones else "None"),
+            ("Restrictions", ", ".join(obj.restrictions) if obj.restrictions else "None"),
+        ],
+    )
+
+
+def _detail_fields_quota(obj: QuotaInfo) -> tuple[str, list[tuple[str, str]]]:
+    return (
+        f"Quota — {obj.family}",
+        [
+            ("Family", obj.family),
+            ("Region", obj.region),
+            ("Current Usage", str(obj.current_usage)),
+            ("Limit", str(obj.limit)),
+            ("Available", str(obj.available)),
+            ("Usage %", f"{obj.usage_percent:.1f}%"),
+            ("Unit", obj.unit),
+        ],
+    )
+
+
+def _detail_fields_pricing(
+    consumption: PriceInfo | None, spot: PriceInfo | None,
+) -> tuple[str, list[tuple[str, str]]]:
+    sku = (consumption or spot).sku_name if (consumption or spot) else "N/A"
+    fields: list[tuple[str, str]] = []
+    if consumption:
+        fields += [
+            ("SKU Name", consumption.sku_name),
+            ("Region", consumption.region),
+            ("Retail Price", f"${consumption.retail_price:.4f}"),
+            ("Unit Price", f"${consumption.unit_price:.4f}"),
+            ("Currency", consumption.currency),
+            ("Unit of Measure", consumption.unit_of_measure),
+            ("Price Type", consumption.price_type),
+            ("Meter Name", consumption.meter_name or "N/A"),
+            ("Product Name", consumption.product_name or "N/A"),
+        ]
+    if spot:
+        fields += [
+            ("Spot Retail Price", f"${spot.retail_price:.4f}"),
+            ("Spot Unit Price", f"${spot.unit_price:.4f}"),
+            ("Spot Meter Name", spot.meter_name or "N/A"),
+        ]
+    if not fields:
+        fields.append(("Info", "No pricing data available"))
+    return (f"Pricing — {sku}", fields)
+
+
+def _detail_fields_recommendation(obj: SkuRecommendation) -> tuple[str, list[tuple[str, str]]]:
+    fields: list[tuple[str, str]] = [
+        ("SKU Name", obj.sku.name),
+        ("Family", obj.sku.family),
+        ("Size", obj.sku.size),
+        ("Tier", obj.sku.tier),
+        ("vCPUs", str(obj.sku.vcpus)),
+        ("Memory (GB)", f"{obj.sku.memory_gb:.1f}"),
+        ("Max Data Disks", str(obj.sku.max_data_disks)),
+        ("OS Disk Size (GB)", str(obj.sku.os_disk_size_gb)),
+        ("Max NICs", str(obj.sku.max_nics)),
+        ("Accelerated Net", "Yes" if obj.sku.accelerated_networking else "No"),
+        ("Compatibility Score", f"{obj.compatibility_score:.1%}"),
+        ("Price/Hr", f"${obj.price.retail_price:.4f}" if obj.price else "N/A"),
+        ("Reasons", "; ".join(obj.reasons) if obj.reasons else "None"),
+    ]
+    if obj.availability:
+        fields.append(("Available", "Yes" if obj.availability.available else "No"))
+    if obj.sku.gpu_count:
+        fields.append(("GPU Count", str(obj.sku.gpu_count)))
+        fields.append(("GPU Type", obj.sku.gpu_type or "N/A"))
+    if obj.sku.capabilities:
+        caps = ", ".join(f"{k}={v}" for k, v in sorted(obj.sku.capabilities.items()))
+        fields.append(("Capabilities", caps))
+    return (f"Alternative — {obj.sku.name}", fields)
+
+
+def _detail_fields_image(obj: ImageInfo) -> tuple[str, list[tuple[str, str]]]:
+    return (
+        f"Image — {obj.publisher}:{obj.offer}:{obj.sku}",
+        [
+            ("Publisher", obj.publisher),
+            ("Offer", obj.offer),
+            ("SKU", obj.sku),
+            ("Version", obj.version),
+            ("OS Type", obj.os_type),
+            ("Architecture", obj.architecture),
+            ("Hyper-V Generation", obj.hyper_v_generation),
+        ],
+    )
+
+
+def _detail_fields_cost(obj: ServiceCostEstimate) -> tuple[str, list[tuple[str, str]]]:
+    fields: list[tuple[str, str]] = [
+        ("Service", obj.service_name),
+        ("Tier / Plan", obj.tier),
+        ("vCPUs", str(obj.vcpus) if obj.vcpus else "N/A"),
+        ("Memory (GB)", f"{obj.memory_gb:.1f}" if obj.memory_gb else "N/A"),
+        ("Hourly Cost", f"${obj.hourly_cost:.4f}"),
+        ("Monthly Cost", f"${obj.monthly_cost:,.2f}"),
+        ("Spot Monthly", f"${obj.spot_monthly:,.2f}" if obj.spot_monthly is not None else "N/A"),
+        ("Currency", obj.currency),
+        ("Notes", "; ".join(obj.notes) if obj.notes else "None"),
+    ]
+    return (f"Cost — {obj.service_name}", fields)
 
 
 class ExportScreen(ModalScreen[str | None]):
@@ -171,6 +316,33 @@ class ExportScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class DetailScreen(ModalScreen[None]):
+    """Modal screen showing detail fields for a selected row."""
+
+    BINDINGS = [Binding("escape", "dismiss_detail", "Close")]
+
+    def __init__(self, title: str, fields: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self._title = title
+        self._fields = fields
+
+    def compose(self) -> ComposeResult:
+        with Container(id="detail-dialog"):
+            yield Label(self._title, classes="section-title")
+            with VerticalScroll(id="detail-body"):
+                for label, value in self._fields:
+                    yield Static(f"[bold]{label}:[/] {value}", classes="detail-field")
+            with Horizontal(classes="detail-buttons"):
+                yield Button("Close", variant="primary", id="btn-detail-close")
+
+    @on(Button.Pressed, "#btn-detail-close")
+    def close_detail(self) -> None:
+        self.dismiss(None)
+
+    def action_dismiss_detail(self) -> None:
+        self.dismiss(None)
+
+
 class AzureAssessorApp(App):
     """Azure VM Assessor TUI Application."""
 
@@ -194,6 +366,7 @@ class AzureAssessorApp(App):
         self._results: list[AssessmentResult] = []
         self._current_skus: list[VmSku] = []
         self._init_error: str | None = None
+        self._row_data: dict[object, object] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -244,21 +417,27 @@ class AzureAssessorApp(App):
             self._init_azure_client()
 
         avail_table = self.query_one("#table-avail", DataTable)
+        avail_table.cursor_type = "row"
         avail_table.add_columns("SKU", "Region", "Available", "Zones", "Restrictions")
 
         quota_table = self.query_one("#table-quota", DataTable)
+        quota_table.cursor_type = "row"
         quota_table.add_columns("Family", "Region", "Usage", "Limit", "Available", "Usage %")
 
         pricing_table = self.query_one("#table-pricing", DataTable)
+        pricing_table.cursor_type = "row"
         pricing_table.add_columns("SKU", "Region", "Price/Hr", "Spot Price/Hr", "Currency", "Product")
 
         alt_table = self.query_one("#table-alt", DataTable)
+        alt_table.cursor_type = "row"
         alt_table.add_columns("SKU", "Score", "vCPUs", "Memory (GB)", "Family", "Price/Hr", "Reasons")
 
         img_table = self.query_one("#table-images", DataTable)
+        img_table.cursor_type = "row"
         img_table.add_columns("Publisher", "Offer", "SKU", "Version", "OS", "Arch", "HyperV Gen", "Compatible")
 
         cost_table = self.query_one("#table-costs", DataTable)
+        cost_table.cursor_type = "row"
         cost_table.add_columns(
             "Service", "Tier/Plan", "vCPUs", "Memory (GB)",
             "Monthly Cost", "Spot Monthly", "vs VM", "Notes",
@@ -475,6 +654,7 @@ class AzureAssessorApp(App):
 
     def _clear_results(self) -> None:
         self._results.clear()
+        self._row_data.clear()
         for table_id in ["#table-avail", "#table-quota", "#table-pricing", "#table-alt", "#table-images", "#table-costs"]:
             try:
                 table = self.query_one(table_id, DataTable)
@@ -490,23 +670,25 @@ class AzureAssessorApp(App):
             avail = result.availability
             table = self.query_one("#table-avail", DataTable)
             status = "[green]Yes[/]" if avail.available else "[red]No[/]"
-            table.add_row(
+            rk = table.add_row(
                 avail.sku_name,
                 avail.region,
                 status,
                 ", ".join(avail.zones) or "N/A",
                 ", ".join(avail.restrictions) or "None",
             )
+            self._row_data[rk] = avail
 
         # Pricing table
         pricing_table = self.query_one("#table-pricing", DataTable)
         price_str = f"${result.pricing.retail_price:.4f}" if result.pricing else "N/A"
         spot_str = f"${result.spot_pricing.retail_price:.4f}" if result.spot_pricing else "N/A"
         product = result.pricing.product_name if result.pricing else "N/A"
-        pricing_table.add_row(
+        rk = pricing_table.add_row(
             result.target_sku, result.region, price_str, spot_str,
             result.pricing.currency if result.pricing else "USD", product,
         )
+        self._row_data[rk] = (result.pricing, result.spot_pricing)
 
         # Alternatives table
         alt_table = self.query_one("#table-alt", DataTable)
@@ -520,21 +702,23 @@ class AzureAssessorApp(App):
                 score_str = f"[red]{score:.1%}[/]"
 
             price_val = f"${alt.price.retail_price:.4f}" if alt.price else "N/A"
-            alt_table.add_row(
+            rk = alt_table.add_row(
                 alt.sku.name, score_str,
                 str(alt.sku.vcpus), f"{alt.sku.memory_gb:.1f}",
                 alt.sku.family, price_val,
                 "; ".join(alt.reasons[:3]),
             )
+            self._row_data[rk] = alt
 
         # Images table
         img_table = self.query_one("#table-images", DataTable)
         for img in result.compatible_images:
-            img_table.add_row(
+            rk = img_table.add_row(
                 img.publisher, img.offer, img.sku, img.version,
                 img.os_type, img.architecture, img.hyper_v_generation,
                 "[green]Yes[/]",
             )
+            self._row_data[rk] = img
 
         # Cost comparison table
         cost_table = self.query_one("#table-costs", DataTable)
@@ -555,7 +739,7 @@ class AzureAssessorApp(App):
             else:
                 vs_vm = "baseline" if est.service_name == "Virtual Machines" else "N/A"
 
-            cost_table.add_row(
+            rk = cost_table.add_row(
                 est.service_name,
                 est.tier,
                 str(est.vcpus) if est.vcpus else "—",
@@ -565,6 +749,7 @@ class AzureAssessorApp(App):
                 vs_vm,
                 "; ".join(est.notes[:2]),
             )
+            self._row_data[rk] = est
 
     def _update_quota_table(self, quotas: list[QuotaInfo]) -> None:
         """Update the quota table."""
@@ -579,8 +764,37 @@ class AzureAssessorApp(App):
             else:
                 pct_str = f"[green]{pct:.1f}%[/]"
 
-            table.add_row(
+            rk = table.add_row(
                 q.family, q.region,
                 str(q.current_usage), str(q.limit),
                 str(q.available), pct_str,
             )
+            self._row_data[rk] = q
+
+    @on(DataTable.RowSelected)
+    def on_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Show detail modal when a row is selected."""
+        obj = self._row_data.get(event.row_key)
+        if obj is None:
+            return
+
+        table_id = event.data_table.id
+        title: str
+        fields: list[tuple[str, str]]
+
+        if table_id == "table-avail" and isinstance(obj, SkuAvailability):
+            title, fields = _detail_fields_availability(obj)
+        elif table_id == "table-quota" and isinstance(obj, QuotaInfo):
+            title, fields = _detail_fields_quota(obj)
+        elif table_id == "table-pricing" and isinstance(obj, tuple):
+            title, fields = _detail_fields_pricing(obj[0], obj[1])
+        elif table_id == "table-alt" and isinstance(obj, SkuRecommendation):
+            title, fields = _detail_fields_recommendation(obj)
+        elif table_id == "table-images" and isinstance(obj, ImageInfo):
+            title, fields = _detail_fields_image(obj)
+        elif table_id == "table-costs" and isinstance(obj, ServiceCostEstimate):
+            title, fields = _detail_fields_cost(obj)
+        else:
+            return
+
+        self.push_screen(DetailScreen(title, fields))

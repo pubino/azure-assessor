@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
-from azure.mgmt.resource.subscriptions import SubscriptionClient
+from azure.mgmt.subscription import SubscriptionClient
 
 from azure_assessor.models import (
     ImageInfo,

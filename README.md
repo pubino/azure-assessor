@@ -190,7 +190,3 @@ pytest --cov=azure_assessor --cov-report=term-missing
 # Run tests in Docker
 docker-compose run test
 ```
-
-## License
-
-MIT

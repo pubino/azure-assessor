@@ -128,7 +128,8 @@ ExportScreen {
 
 #export-dialog {
     width: 64;
-    height: 28;
+    height: 90%;
+    max-height: 40;
     padding: 1 2;
     background: $surface;
     border: round $primary;
@@ -142,15 +143,20 @@ ExportScreen {
     margin: 0 0 1 0;
 }
 
-#export-dialog Checkbox {
-    height: 1;
+#export-body {
+    height: 1fr;
+}
+
+#export-body Checkbox {
+    width: 100%;
     margin: 0 0 0 0;
 }
 
 .export-buttons {
     height: 3;
     align: center middle;
-    margin: 1 0;
+    margin: 1 0 0 0;
+    dock: bottom;
 }
 
 DetailScreen {
@@ -336,23 +342,24 @@ class ExportScreen(ModalScreen[dict | None]):
     def compose(self) -> ComposeResult:
         with Container(id="export-dialog"):
             yield Label("Export Results", classes="section-title")
-            yield Label("File path:")
-            yield Input(placeholder="e.g., results.xlsx", id="export-path")
-            yield Label("Format:")
-            yield Select(
-                [
-                    ("Excel (.xlsx)", "excel"),
-                    ("CSV (.csv)", "csv"),
-                    ("JSON (.json)", "json"),
-                ],
-                value="excel",
-                id="export-format",
-            )
-            yield Label("Include components:")
-            yield Checkbox("Summary", value=True, id="export-comp-summary")
-            yield Checkbox("Alternatives", value=True, id="export-comp-alternatives")
-            yield Checkbox("Compatible Images", value=True, id="export-comp-images")
-            yield Checkbox("Cost Comparison", value=True, id="export-comp-costs")
+            with VerticalScroll(id="export-body"):
+                yield Label("File path:")
+                yield Input(placeholder="e.g., results.xlsx", id="export-path")
+                yield Label("Format:")
+                yield Select(
+                    [
+                        ("Excel (.xlsx)", "excel"),
+                        ("CSV (.csv)", "csv"),
+                        ("JSON (.json)", "json"),
+                    ],
+                    value="excel",
+                    id="export-format",
+                )
+                yield Label("Include components:")
+                yield Checkbox("Summary", value=True, id="export-comp-summary")
+                yield Checkbox("Alternatives", value=True, id="export-comp-alternatives")
+                yield Checkbox("Compatible Images", value=True, id="export-comp-images")
+                yield Checkbox("Cost Comparison", value=True, id="export-comp-costs")
             with Horizontal(classes="export-buttons"):
                 yield Button("Export", variant="primary", id="btn-export-confirm")
                 yield Button("Cancel", variant="default", id="btn-export-cancel")

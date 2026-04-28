@@ -416,3 +416,281 @@ class TestEstimateMonthlyCosts:
             "Standard_NonExistent", "westus99", vcpus=4, memory_gb=16.0,
         )
         assert results == []
+
+
+def _make_disk_items() -> list[dict]:
+    return [
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 19.71,
+            "unitPrice": 19.71,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1/Month",
+            "type": "Consumption",
+            "meterName": "P10 LRS Disk",
+            "productName": "Premium SSD Managed Disks",
+        },
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 24.64,
+            "unitPrice": 24.64,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1/Month",
+            "type": "Consumption",
+            "meterName": "P10 ZRS Disk",
+            "productName": "Premium SSD Managed Disks",
+        },
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 9.60,
+            "unitPrice": 9.60,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1/Month",
+            "type": "Consumption",
+            "meterName": "E10 LRS Disk",
+            "productName": "Standard SSD Managed Disks",
+        },
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 0.0921,
+            "unitPrice": 0.0921,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1 GiB/Month",
+            "type": "Consumption",
+            "meterName": "Premium SSD v2 LRS Provisioned Capacity",
+            "productName": "Premium SSD v2 Managed Disks",
+        },
+    ]
+
+
+class TestGetManagedDiskPrice:
+    def test_premium_ssd_picks_smallest_fitting_tier(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(_make_disk_items())
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        # 100 GB requested → P10 (128 GB) is the smallest tier that fits
+        result = client.get_managed_disk_price("eastus", "Premium SSD", size_gb=100)
+        assert result is not None
+        assert result.service_name == "Managed Disk"
+        assert "P10" in result.tier
+        assert result.monthly_cost == 19.71
+        assert result.storage_gb == 100
+
+    def test_prefers_lrs_over_zrs(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        # ZRS appears first in the list, but LRS should still win.
+        items = list(reversed(_make_disk_items()))
+        resp.json.return_value = _make_price_response(items)
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_managed_disk_price("eastus", "Premium SSD", size_gb=128)
+        assert result is not None
+        assert result.monthly_cost == 19.71  # LRS price, not ZRS 24.64
+
+    def test_standard_ssd_tier_match(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(_make_disk_items())
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_managed_disk_price("eastus", "Standard SSD", size_gb=128)
+        assert result is not None
+        assert "E10" in result.tier
+        assert result.monthly_cost == 9.60
+
+    def test_premium_ssd_v2_per_gib(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(_make_disk_items())
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_managed_disk_price("eastus", "Premium SSD v2", size_gb=200)
+        assert result is not None
+        assert "Premium SSD v2" in result.tier
+        assert result.monthly_cost == round(0.0921 * 200, 2)
+        assert result.storage_gb == 200
+
+    def test_size_exceeds_largest_tier(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(_make_disk_items())
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_managed_disk_price("eastus", "Premium SSD", size_gb=99999)
+        assert result is None
+
+    def test_unknown_disk_type(self, mock_pricing_client):
+        client, _ = mock_pricing_client
+        result = client.get_managed_disk_price("eastus", "Floppy Disk", size_gb=100)
+        assert result is None
+
+
+def _make_postgres_items() -> list[dict]:
+    return [
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 0.034,
+            "unitPrice": 0.034,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1 Hour",
+            "type": "Consumption",
+            "meterName": "B1ms Compute",
+            "productName": "Azure Database for PostgreSQL Flexible Server Burstable",
+            "skuName": "Burstable B1ms",
+        },
+        {
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 0.123,
+            "unitPrice": 0.123,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1 Hour",
+            "type": "Consumption",
+            "meterName": "D2s v3 Compute",
+            "productName": "Azure Database for PostgreSQL Flexible Server General Purpose",
+            "skuName": "GP D2s v3",
+        },
+    ]
+
+
+class TestGetDatabasePrice:
+    def test_postgres_burstable_match(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(_make_postgres_items())
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_database_price(
+            "eastus", "Azure Database for PostgreSQL", "Burstable B1ms",
+        )
+        assert result is not None
+        assert result.service_name == "Azure Database for PostgreSQL"
+        assert result.tier == "Burstable B1ms"
+        assert result.monthly_cost == round(0.034 * 730, 2)
+
+    def test_postgres_picks_cheapest_matching(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        # Add a duplicate B1ms meter at a higher price; cheapest should win.
+        items = _make_postgres_items() + [{
+            "armSkuName": "",
+            "armRegionName": "eastus",
+            "retailPrice": 0.099,
+            "unitPrice": 0.099,
+            "currencyCode": "USD",
+            "unitOfMeasure": "1 Hour",
+            "type": "Consumption",
+            "meterName": "B1ms Compute HA",
+            "productName": "Azure Database for PostgreSQL Flexible Server Burstable",
+            "skuName": "Burstable B1ms",
+        }]
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response(items)
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_database_price(
+            "eastus", "Azure Database for PostgreSQL", "Burstable B1ms",
+        )
+        assert result is not None
+        assert result.hourly_cost == 0.034
+
+    def test_unknown_db_kind(self, mock_pricing_client):
+        client, _ = mock_pricing_client
+        result = client.get_database_price("eastus", "Unknown DB", "Some Tier")
+        assert result is None
+
+    def test_unknown_tier(self, mock_pricing_client):
+        client, _ = mock_pricing_client
+        result = client.get_database_price(
+            "eastus", "Azure Database for PostgreSQL", "Unknown Tier",
+        )
+        assert result is None
+
+    def test_no_matching_meter(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+        resp = MagicMock()
+        resp.json.return_value = _make_price_response([])
+        resp.raise_for_status = MagicMock()
+        mock_http.get.return_value = resp
+
+        result = client.get_database_price(
+            "eastus", "Azure Database for PostgreSQL", "Burstable B1ms",
+        )
+        assert result is None
+
+
+class TestEstimateMonthlyCostsWithAddons:
+    def test_appends_storage_and_database(self, mock_pricing_client):
+        client, mock_http = mock_pricing_client
+
+        # Sequence matches the calls inside estimate_monthly_costs:
+        # VM consumption, VM spot, Container Apps, AKS mgmt, AKS VM, AKS spot,
+        # App Service, Managed Disk, Database
+        responses = []
+        for items in [
+            [_make_price_item()],                 # VM consumption
+            [],                                   # VM spot
+            _make_container_apps_items(),         # Container Apps
+            _make_aks_items(),                    # AKS mgmt
+            [_make_price_item()],                 # AKS node VM consumption
+            [],                                   # AKS node VM spot
+            _make_app_service_items(),            # App Service
+            _make_disk_items(),                   # Managed Disk
+            _make_postgres_items(),               # Database
+        ]:
+            r = MagicMock()
+            r.json.return_value = _make_price_response(items)
+            r.raise_for_status = MagicMock()
+            responses.append(r)
+        mock_http.get.side_effect = responses
+
+        results = client.estimate_monthly_costs(
+            "Standard_D4s_v3", "eastus", vcpus=4, memory_gb=16.0,
+            storage_type="Premium SSD", storage_gb=128,
+            database_kind="Azure Database for PostgreSQL",
+            database_tier="Burstable B1ms",
+        )
+        names = [r.service_name for r in results]
+        assert "Managed Disk" in names
+        assert "Azure Database for PostgreSQL" in names
+
+    def test_no_addons_when_unset(self, mock_pricing_client):
+        """When add-on params are omitted, no extra HTTP calls or rows are added."""
+        client, mock_http = mock_pricing_client
+
+        responses = []
+        for items in [
+            [_make_price_item()],
+            [],
+            _make_container_apps_items(),
+            _make_aks_items(),
+            [_make_price_item()],
+            [],
+            _make_app_service_items(),
+        ]:
+            r = MagicMock()
+            r.json.return_value = _make_price_response(items)
+            r.raise_for_status = MagicMock()
+            responses.append(r)
+        mock_http.get.side_effect = responses
+
+        results = client.estimate_monthly_costs(
+            "Standard_D4s_v3", "eastus", vcpus=4, memory_gb=16.0,
+        )
+        names = [r.service_name for r in results]
+        assert "Managed Disk" not in names
+        assert not any(n.startswith("Azure Database") for n in names)

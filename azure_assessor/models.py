@@ -100,13 +100,15 @@ class SkuRecommendation:
 class ServiceCostEstimate:
     """Cost estimate for a single Azure service option."""
 
-    service_name: str  # "Virtual Machines", "Container Apps", "AKS", "App Service"
+    service_name: str  # "Virtual Machines", "Container Apps", "AKS", "App Service",
+                       # "Managed Disk", "Azure SQL Database", etc.
     tier: str  # e.g., "Standard_D4s_v3", "Consumption", "P1v3"
     monthly_cost: float
     hourly_cost: float
     currency: str = "USD"
     vcpus: int = 0
     memory_gb: float = 0.0
+    storage_gb: int = 0
     spot_monthly: float | None = None
     notes: list[str] = field(default_factory=list)
 

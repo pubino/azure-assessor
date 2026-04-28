@@ -38,6 +38,9 @@ from azure_assessor.models import (
     SkuRecommendation,
     VmSku,
 )
+from azure_assessor.pricing import DATABASE_PRESETS, DISK_TIER_LADDERS
+
+DISK_TYPES = list(DISK_TIER_LADDERS.keys()) + ["Premium SSD v2"]
 
 STYLE_CSS = """
 Screen {
@@ -162,6 +165,32 @@ DetailScreen {
     align: center middle;
     dock: bottom;
 }
+
+AddonsScreen {
+    align: center middle;
+}
+
+#addons-dialog {
+    width: 70;
+    height: 28;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#addons-dialog Label {
+    margin: 1 0 0 0;
+}
+
+#addons-dialog Input, #addons-dialog Select {
+    margin: 0 0 0 0;
+}
+
+.addons-buttons {
+    height: 3;
+    align: center middle;
+    margin: 1 0;
+}
 """
 
 
@@ -269,6 +298,7 @@ def _detail_fields_cost(obj: ServiceCostEstimate) -> tuple[str, list[tuple[str, 
         ("Tier / Plan", obj.tier),
         ("vCPUs", str(obj.vcpus) if obj.vcpus else "N/A"),
         ("Memory (GB)", f"{obj.memory_gb:.1f}" if obj.memory_gb else "N/A"),
+        ("Storage (GB)", str(obj.storage_gb) if obj.storage_gb else "N/A"),
         ("Hourly Cost", f"${obj.hourly_cost:.4f}"),
         ("Monthly Cost", f"${obj.monthly_cost:,.2f}"),
         ("Spot Monthly", f"${obj.spot_monthly:,.2f}" if obj.spot_monthly is not None else "N/A"),
@@ -316,6 +346,96 @@ class ExportScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class AddonsScreen(ModalScreen[dict | None]):
+    """Modal for configuring storage and database add-ons."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, current: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self._current = current or {}
+
+    def compose(self) -> ComposeResult:
+        with Container(id="addons-dialog"):
+            yield Label("Cost Add-ons", classes="section-title")
+
+            yield Label("Storage type:")
+            storage_options: list[tuple[str, str]] = [("None", "none")] + [
+                (t, t) for t in DISK_TYPES
+            ]
+            yield Select(
+                storage_options,
+                value=self._current.get("storage_type") or "none",
+                id="addon-storage-type",
+            )
+
+            yield Label("Storage size (GB):")
+            yield Input(
+                value=str(self._current.get("storage_gb") or ""),
+                placeholder="e.g., 128",
+                id="addon-storage-gb",
+            )
+
+            yield Label("Database tier:")
+            db_options: list[tuple[str, str]] = [("None", "none")]
+            for kind, tiers in DATABASE_PRESETS.items():
+                for tier in tiers:
+                    db_options.append((f"{kind} — {tier}", f"{kind}|{tier}"))
+            current_db = "none"
+            if self._current.get("database_kind") and self._current.get("database_tier"):
+                current_db = f"{self._current['database_kind']}|{self._current['database_tier']}"
+            yield Select(db_options, value=current_db, id="addon-database")
+
+            with Horizontal(classes="addons-buttons"):
+                yield Button("Apply", variant="primary", id="btn-addons-apply")
+                yield Button("Clear", variant="warning", id="btn-addons-clear")
+                yield Button("Cancel", variant="default", id="btn-addons-cancel")
+
+    @on(Button.Pressed, "#btn-addons-apply")
+    def _apply(self) -> None:
+        storage_type_val = self.query_one("#addon-storage-type", Select).value
+        storage_gb_str = self.query_one("#addon-storage-gb", Input).value.strip()
+        db_val = self.query_one("#addon-database", Select).value
+
+        storage_type: str | None = None
+        storage_gb = 0
+        if storage_type_val and storage_type_val != "none":
+            try:
+                storage_gb = int(storage_gb_str)
+            except ValueError:
+                storage_gb = 0
+            if storage_gb > 0:
+                storage_type = str(storage_type_val)
+
+        database_kind: str | None = None
+        database_tier: str | None = None
+        if db_val and db_val != "none" and isinstance(db_val, str) and "|" in db_val:
+            database_kind, database_tier = db_val.split("|", 1)
+
+        self.dismiss({
+            "storage_type": storage_type,
+            "storage_gb": storage_gb,
+            "database_kind": database_kind,
+            "database_tier": database_tier,
+        })
+
+    @on(Button.Pressed, "#btn-addons-clear")
+    def _clear(self) -> None:
+        self.dismiss({
+            "storage_type": None,
+            "storage_gb": 0,
+            "database_kind": None,
+            "database_tier": None,
+        })
+
+    @on(Button.Pressed, "#btn-addons-cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class DetailScreen(ModalScreen[None]):
     """Modal screen showing detail fields for a selected row."""
 
@@ -356,6 +476,7 @@ class AzureAssessorApp(App):
         Binding("e", "export", "Export"),
         Binding("r", "refresh", "Refresh"),
         Binding("d", "toggle_dark", "Toggle Dark"),
+        Binding("o", "addons", "Add-ons"),
     ]
 
     def __init__(self, azure_client=None, pricing_client=None) -> None:
@@ -367,6 +488,12 @@ class AzureAssessorApp(App):
         self._current_skus: list[VmSku] = []
         self._init_error: str | None = None
         self._row_data: dict[object, object] = {}
+        self._addons: dict[str, object] = {
+            "storage_type": None,
+            "storage_gb": 0,
+            "database_kind": None,
+            "database_tier": None,
+        }
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -384,6 +511,7 @@ class AzureAssessorApp(App):
                 with Horizontal(classes="button-row"):
                     yield Button("Assess", variant="primary", id="btn-assess")
                     yield Button("Quota", variant="warning", id="btn-quota")
+                    yield Button("Add-ons", variant="default", id="btn-addons")
                     yield Button("Export", variant="success", id="btn-export")
                     yield Button("Clear", variant="error", id="btn-clear")
 
@@ -476,6 +604,27 @@ class AzureAssessorApp(App):
     @on(Button.Pressed, "#btn-clear")
     def on_clear_pressed(self) -> None:
         self._clear_results()
+
+    @on(Button.Pressed, "#btn-addons")
+    def on_addons_pressed(self) -> None:
+        self.action_addons()
+
+    def action_addons(self) -> None:
+        self.push_screen(AddonsScreen(dict(self._addons)), self._handle_addons)
+
+    def _handle_addons(self, result: dict | None) -> None:
+        if result is None:
+            return
+        self._addons = result
+        if result.get("storage_type") or result.get("database_kind"):
+            parts = []
+            if result.get("storage_type"):
+                parts.append(f"{result['storage_type']} {result['storage_gb']} GB")
+            if result.get("database_kind"):
+                parts.append(f"{result['database_kind']} / {result['database_tier']}")
+            self.notify(f"Add-ons set: {'; '.join(parts)}")
+        else:
+            self.notify("Add-ons cleared")
 
     def action_assess(self) -> None:
         region = self.query_one("#region-input", Input).value.strip()
@@ -579,6 +728,10 @@ class AzureAssessorApp(App):
                         sku_name, region,
                         vcpus=target_sku_obj.vcpus,
                         memory_gb=target_sku_obj.memory_gb,
+                        storage_type=self._addons.get("storage_type"),  # type: ignore[arg-type]
+                        storage_gb=int(self._addons.get("storage_gb") or 0),
+                        database_kind=self._addons.get("database_kind"),  # type: ignore[arg-type]
+                        database_tier=self._addons.get("database_tier"),  # type: ignore[arg-type]
                     )
                 except Exception:
                     pass  # non-critical, don't block assessment

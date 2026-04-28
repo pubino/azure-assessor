@@ -8,6 +8,56 @@ from azure_assessor.models import PriceInfo, ServiceCostEstimate
 
 RETAIL_PRICES_URL = "https://prices.azure.com/api/retail/prices"
 
+# Managed disk tier ladders: (tier_name, max_size_gb). Used to map a
+# requested size to the smallest tier that contains it.
+DISK_TIER_LADDERS: dict[str, list[tuple[str, int]]] = {
+    "Premium SSD": [
+        ("P1", 4), ("P2", 8), ("P3", 16), ("P4", 32), ("P6", 64),
+        ("P10", 128), ("P15", 256), ("P20", 512), ("P30", 1024),
+        ("P40", 2048), ("P50", 4096), ("P60", 8192),
+        ("P70", 16384), ("P80", 32767),
+    ],
+    "Standard SSD": [
+        ("E1", 4), ("E2", 8), ("E3", 16), ("E4", 32), ("E6", 64),
+        ("E10", 128), ("E15", 256), ("E20", 512), ("E30", 1024),
+        ("E40", 2048), ("E50", 4096), ("E60", 8192),
+        ("E70", 16384), ("E80", 32767),
+    ],
+    "Standard HDD": [
+        ("S4", 32), ("S6", 64), ("S10", 128), ("S15", 256), ("S20", 512),
+        ("S30", 1024), ("S40", 2048), ("S50", 4096), ("S60", 8192),
+        ("S70", 16384), ("S80", 32767),
+    ],
+}
+
+# Database preset tiers. Each entry's value is a list of substrings that must
+# all appear (case-insensitive) in either skuName, meterName, or productName
+# for the price item to match.
+DATABASE_PRESETS: dict[str, dict[str, dict[str, str | list[str]]]] = {
+    "Azure SQL Database": {
+        "Basic (DTU)": {"service": "SQL Database", "match": ["Basic", "DTU"]},
+        "S0 Standard (10 DTU)": {"service": "SQL Database", "match": ["Standard", "S0"]},
+        "GP Gen5 2 vCore": {"service": "SQL Database", "match": ["General Purpose", "Gen5", "2 vCore"]},
+        "GP Gen5 4 vCore": {"service": "SQL Database", "match": ["General Purpose", "Gen5", "4 vCore"]},
+    },
+    "Azure Database for PostgreSQL": {
+        "Burstable B1ms": {"service": "Azure Database for PostgreSQL", "match": ["Burstable", "B1ms"]},
+        "Burstable B2s": {"service": "Azure Database for PostgreSQL", "match": ["Burstable", "B2s"]},
+        "GP D2s v3": {"service": "Azure Database for PostgreSQL", "match": ["General Purpose", "D2s v3"]},
+        "GP D4s v3": {"service": "Azure Database for PostgreSQL", "match": ["General Purpose", "D4s v3"]},
+    },
+    "Azure Database for MySQL": {
+        "Burstable B1ms": {"service": "Azure Database for MySQL", "match": ["Burstable", "B1ms"]},
+        "Burstable B2s": {"service": "Azure Database for MySQL", "match": ["Burstable", "B2s"]},
+        "GP D2s v3": {"service": "Azure Database for MySQL", "match": ["General Purpose", "D2s v3"]},
+        "GP D4s v3": {"service": "Azure Database for MySQL", "match": ["General Purpose", "D4s v3"]},
+    },
+    "Azure Cosmos DB": {
+        "Serverless": {"service": "Azure Cosmos DB", "match": ["Serverless"]},
+        "Provisioned 400 RU/s": {"service": "Azure Cosmos DB", "match": ["100 RU/s"]},
+    },
+}
+
 
 class PricingClient:
     """Client for Azure Retail Prices API (no authentication required)."""
@@ -308,6 +358,177 @@ class PricingClient:
             notes=[f"Plan: {best_plan}", f"Meter: {best.meter_name}"],
         )
 
+    # ---- Storage and database add-ons ----
+
+    def get_managed_disk_price(
+        self,
+        region: str,
+        disk_type: str,
+        size_gb: int,
+        currency: str = "USD",
+        hours: float = 730,
+    ) -> ServiceCostEstimate | None:
+        """Estimate monthly cost for a managed disk of a given type and size.
+
+        Tier-based disks (Premium SSD, Standard SSD, Standard HDD) are billed
+        at the smallest tier that fits ``size_gb`` (LRS redundancy). Premium
+        SSD v2 is billed per provisioned GiB-month for the capacity component
+        only (IOPS / throughput surcharges are not included).
+        """
+        arm_region = region.lower().replace(" ", "")
+
+        if disk_type in DISK_TIER_LADDERS:
+            ladder = DISK_TIER_LADDERS[disk_type]
+            tier_name = next((name for name, max_sz in ladder if max_sz >= size_gb), None)
+            if tier_name is None:
+                return None
+            filter_expr = (
+                f"armRegionName eq '{arm_region}' "
+                f"and serviceName eq 'Storage' "
+                f"and priceType eq 'Consumption'"
+            )
+            prices = self._query_prices(filter_expr, currency)
+            tier_lower = tier_name.lower()
+            best: PriceInfo | None = None
+            for p in prices:
+                meter = p.meter_name.lower()
+                product = p.product_name.lower()
+                if disk_type.lower() not in product:
+                    continue
+                # Match the tier code as a whole token (e.g. "p10" in "P10 LRS Disk").
+                tokens = meter.replace("/", " ").split()
+                if tier_lower not in tokens:
+                    continue
+                # Prefer LRS redundancy when multiple meters match the tier.
+                if "lrs" in tokens:
+                    best = p
+                    break
+                if best is None:
+                    best = p
+            if best is None:
+                return None
+            monthly = best.retail_price
+            return ServiceCostEstimate(
+                service_name="Managed Disk",
+                tier=f"{disk_type} {tier_name}",
+                monthly_cost=round(monthly, 2),
+                hourly_cost=round(monthly / hours, 6) if hours else 0.0,
+                currency=currency,
+                storage_gb=size_gb,
+                notes=[f"Tier {tier_name} ({disk_type})", f"Provisioned {size_gb} GiB"],
+            )
+
+        if disk_type == "Premium SSD v2":
+            filter_expr = (
+                f"armRegionName eq '{arm_region}' "
+                f"and serviceName eq 'Storage' "
+                f"and priceType eq 'Consumption'"
+            )
+            prices = self._query_prices(filter_expr, currency)
+            per_gib_month: float | None = None
+            chosen_meter = ""
+            for p in prices:
+                product = p.product_name.lower()
+                meter = p.meter_name.lower()
+                uom = p.unit_of_measure.lower()
+                if "premium ssd v2" not in product:
+                    continue
+                if "provisioned capacity" in meter or ("gib" in uom and "month" in uom):
+                    per_gib_month = p.retail_price
+                    chosen_meter = p.meter_name
+                    break
+            if per_gib_month is None:
+                return None
+            monthly = per_gib_month * size_gb
+            return ServiceCostEstimate(
+                service_name="Managed Disk",
+                tier=f"Premium SSD v2 {size_gb} GiB",
+                monthly_cost=round(monthly, 2),
+                hourly_cost=round(monthly / hours, 6) if hours else 0.0,
+                currency=currency,
+                storage_gb=size_gb,
+                notes=[
+                    f"Per-GiB rate: ${per_gib_month}/GiB-month",
+                    f"Meter: {chosen_meter}",
+                    "IOPS / throughput surcharges not included",
+                ],
+            )
+
+        return None
+
+    def get_database_price(
+        self,
+        region: str,
+        db_kind: str,
+        tier_key: str,
+        currency: str = "USD",
+        hours: float = 730,
+    ) -> ServiceCostEstimate | None:
+        """Estimate monthly cost for a managed database tier preset.
+
+        ``db_kind`` and ``tier_key`` must come from ``DATABASE_PRESETS`` keys.
+        Costs reflect compute only — storage, backup, and egress are excluded.
+        """
+        presets = DATABASE_PRESETS.get(db_kind)
+        if not presets:
+            return None
+        preset = presets.get(tier_key)
+        if not preset:
+            return None
+
+        service_name = preset["service"]
+        match_terms: list[str] = list(preset["match"])  # type: ignore[arg-type]
+        arm_region = region.lower().replace(" ", "")
+
+        filter_expr = (
+            f"armRegionName eq '{arm_region}' "
+            f"and serviceName eq '{service_name}' "
+            f"and priceType eq 'Consumption'"
+        )
+        prices = self._query_prices(filter_expr, currency)
+        if not prices:
+            return None
+
+        terms_lower = [t.lower() for t in match_terms]
+        candidates: list[PriceInfo] = []
+        for p in prices:
+            haystack = " ".join([
+                p.meter_name.lower(),
+                p.product_name.lower(),
+                p.sku_name.lower(),
+            ])
+            if all(term in haystack for term in terms_lower):
+                candidates.append(p)
+
+        if not candidates:
+            return None
+
+        chosen = min(candidates, key=lambda p: p.retail_price)
+        uom = chosen.unit_of_measure.lower()
+        if "hour" in uom:
+            hourly = chosen.retail_price
+            monthly = hourly * hours
+        elif "month" in uom:
+            monthly = chosen.retail_price
+            hourly = monthly / hours if hours else 0.0
+        else:
+            # Unknown unit: surface it but don't extrapolate.
+            hourly = chosen.retail_price
+            monthly = chosen.retail_price * hours
+
+        return ServiceCostEstimate(
+            service_name=db_kind,
+            tier=tier_key,
+            monthly_cost=round(monthly, 2),
+            hourly_cost=round(hourly, 4),
+            currency=currency,
+            notes=[
+                f"Meter: {chosen.meter_name}",
+                f"Unit: {chosen.unit_of_measure}",
+                "Compute only; storage and backup not included",
+            ],
+        )
+
     def estimate_monthly_costs(
         self,
         sku_name: str,
@@ -316,8 +537,17 @@ class PricingClient:
         memory_gb: float,
         currency: str = "USD",
         hours: float = 730,
+        storage_type: str | None = None,
+        storage_gb: int = 0,
+        database_kind: str | None = None,
+        database_tier: str | None = None,
     ) -> list[ServiceCostEstimate]:
-        """Orchestrate cost estimates across VM, Container Apps, AKS, App Service."""
+        """Orchestrate cost estimates across VM, Container Apps, AKS, App Service.
+
+        When ``storage_type`` and ``storage_gb`` are provided, a Managed Disk
+        line item is appended. When ``database_kind`` and ``database_tier`` are
+        provided, a database line item is appended.
+        """
         estimates: list[ServiceCostEstimate] = []
 
         # 1. VM cost (baseline)
@@ -355,5 +585,17 @@ class PricingClient:
         app_svc = self.get_app_service_price(region, vcpus, memory_gb, currency, hours)
         if app_svc:
             estimates.append(app_svc)
+
+        # 5. Optional managed disk add-on
+        if storage_type and storage_gb > 0:
+            disk = self.get_managed_disk_price(region, storage_type, storage_gb, currency, hours)
+            if disk:
+                estimates.append(disk)
+
+        # 6. Optional database add-on
+        if database_kind and database_tier:
+            db = self.get_database_price(region, database_kind, database_tier, currency, hours)
+            if db:
+                estimates.append(db)
 
         return estimates

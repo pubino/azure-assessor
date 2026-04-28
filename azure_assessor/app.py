@@ -13,6 +13,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -30,6 +31,7 @@ from azure_assessor.advisor import SkuAdvisor
 from azure_assessor.export import export_csv, export_excel, export_json
 from azure_assessor.models import (
     AssessmentResult,
+    ExportComponents,
     ImageInfo,
     PriceInfo,
     QuotaInfo,
@@ -90,6 +92,17 @@ Screen {
     margin: 0 1;
 }
 
+.addons-status {
+    height: 1;
+    color: $text-muted;
+    margin: 0 1 0 1;
+}
+
+.addons-status.active {
+    color: $success;
+    text-style: bold;
+}
+
 #results-panel {
     height: 1fr;
     margin: 0 1 0 1;
@@ -114,19 +127,24 @@ ExportScreen {
 }
 
 #export-dialog {
-    width: 60;
-    height: 18;
+    width: 64;
+    height: 28;
     padding: 1 2;
     background: $surface;
     border: round $primary;
 }
 
 #export-dialog Label {
-    margin: 1 0;
+    margin: 1 0 0 0;
 }
 
 #export-dialog Input {
     margin: 0 0 1 0;
+}
+
+#export-dialog Checkbox {
+    height: 1;
+    margin: 0 0 0 0;
 }
 
 .export-buttons {
@@ -308,8 +326,12 @@ def _detail_fields_cost(obj: ServiceCostEstimate) -> tuple[str, list[tuple[str, 
     return (f"Cost — {obj.service_name}", fields)
 
 
-class ExportScreen(ModalScreen[str | None]):
-    """Modal screen for export options."""
+class ExportScreen(ModalScreen[dict | None]):
+    """Modal screen for export options.
+
+    Returns a dict with keys ``format``, ``path``, and ``components`` (an
+    ``ExportComponents``), or ``None`` if cancelled.
+    """
 
     def compose(self) -> ComposeResult:
         with Container(id="export-dialog"):
@@ -326,6 +348,11 @@ class ExportScreen(ModalScreen[str | None]):
                 value="excel",
                 id="export-format",
             )
+            yield Label("Include components:")
+            yield Checkbox("Summary", value=True, id="export-comp-summary")
+            yield Checkbox("Alternatives", value=True, id="export-comp-alternatives")
+            yield Checkbox("Compatible Images", value=True, id="export-comp-images")
+            yield Checkbox("Cost Comparison", value=True, id="export-comp-costs")
             with Horizontal(classes="export-buttons"):
                 yield Button("Export", variant="primary", id="btn-export-confirm")
                 yield Button("Cancel", variant="default", id="btn-export-cancel")
@@ -339,7 +366,14 @@ class ExportScreen(ModalScreen[str | None]):
         if not path:
             ext_map = {"excel": ".xlsx", "csv": ".csv", "json": ".json"}
             path = f"azure_assessment_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}{ext_map.get(fmt, '.json')}"
-        self.dismiss(f"{fmt}:{path}")
+
+        components = ExportComponents(
+            summary=self.query_one("#export-comp-summary", Checkbox).value,
+            alternatives=self.query_one("#export-comp-alternatives", Checkbox).value,
+            compatible_images=self.query_one("#export-comp-images", Checkbox).value,
+            cost_comparison=self.query_one("#export-comp-costs", Checkbox).value,
+        )
+        self.dismiss({"format": fmt, "path": path, "components": components})
 
     @on(Button.Pressed, "#btn-export-cancel")
     def cancel_export(self) -> None:
@@ -514,6 +548,7 @@ class AzureAssessorApp(App):
                     yield Button("Add-ons", variant="default", id="btn-addons")
                     yield Button("Export", variant="success", id="btn-export")
                     yield Button("Clear", variant="error", id="btn-clear")
+                yield Static("Add-ons: none", id="addons-status", classes="addons-status")
 
             with Container(id="loading-container"):
                 yield LoadingIndicator()
@@ -616,15 +651,31 @@ class AzureAssessorApp(App):
         if result is None:
             return
         self._addons = result
+        self._refresh_addons_indicator()
         if result.get("storage_type") or result.get("database_kind"):
-            parts = []
-            if result.get("storage_type"):
-                parts.append(f"{result['storage_type']} {result['storage_gb']} GB")
-            if result.get("database_kind"):
-                parts.append(f"{result['database_kind']} / {result['database_tier']}")
-            self.notify(f"Add-ons set: {'; '.join(parts)}")
+            self.notify(f"Add-ons set: {self._addons_summary()}")
         else:
             self.notify("Add-ons cleared")
+
+    def _addons_summary(self) -> str:
+        parts: list[str] = []
+        if self._addons.get("storage_type"):
+            parts.append(f"{self._addons['storage_type']} {self._addons['storage_gb']} GB")
+        if self._addons.get("database_kind"):
+            parts.append(f"{self._addons['database_kind']} / {self._addons['database_tier']}")
+        return " · ".join(parts) if parts else "none"
+
+    def _refresh_addons_indicator(self) -> None:
+        try:
+            status = self.query_one("#addons-status", Static)
+        except NoMatches:
+            return
+        summary = self._addons_summary()
+        status.update(f"Add-ons: {summary}")
+        if summary == "none":
+            status.remove_class("active")
+        else:
+            status.add_class("active")
 
     def action_assess(self) -> None:
         region = self.query_one("#region-input", Input).value.strip()
@@ -646,18 +697,22 @@ class AzureAssessorApp(App):
     def action_refresh(self) -> None:
         self.action_assess()
 
-    def _handle_export(self, result: str | None) -> None:
+    def _handle_export(self, result: dict | None) -> None:
         if not result:
             return
-        fmt, path_str = result.split(":", 1)
-        path = Path(path_str)
+        fmt = result["format"]
+        path = Path(result["path"])
+        components: ExportComponents = result["components"]
+        if not components.any_selected():
+            self.notify("Select at least one component to export", severity="warning")
+            return
         try:
             if fmt == "excel":
-                export_excel(self._results, path)
+                export_excel(self._results, path, components)
             elif fmt == "csv":
-                export_csv(self._results, path)
+                export_csv(self._results, path, components)
             elif fmt == "json":
-                export_json(self._results, path)
+                export_json(self._results, path, components)
             self.notify(f"Exported to {path}", severity="information")
         except Exception as e:
             self.notify(f"Export failed: {e}", severity="error")

@@ -11,37 +11,46 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from azure_assessor.models import AssessmentResult
+from azure_assessor.models import AssessmentResult, ExportComponents
 
 
-def _flatten_result(result: AssessmentResult) -> dict:
-    """Flatten an AssessmentResult into a single-level dict for tabular export."""
+def _flatten_result(
+    result: AssessmentResult, components: ExportComponents | None = None
+) -> dict:
+    """Flatten an AssessmentResult into a single-level dict for tabular export.
+
+    Identifier fields (target_sku, region, timestamp) are always included so
+    that filtered exports remain joinable.
+    """
+    components = components or ExportComponents.all()
     row: dict = {
         "target_sku": result.target_sku,
         "region": result.region,
         "timestamp": result.timestamp,
     }
-    if result.availability:
-        row["available"] = result.availability.available
-        row["zones"] = ", ".join(result.availability.zones)
-        row["restrictions"] = ", ".join(result.availability.restrictions)
-    if result.quota:
-        row["quota_family"] = result.quota.family
-        row["quota_current"] = result.quota.current_usage
-        row["quota_limit"] = result.quota.limit
-        row["quota_available"] = result.quota.available
-        row["quota_usage_pct"] = round(result.quota.usage_percent, 1)
-    if result.pricing:
-        row["price_hourly"] = result.pricing.retail_price
-        row["price_currency"] = result.pricing.currency
-        row["price_type"] = result.pricing.price_type
-    if result.spot_pricing:
-        row["spot_price_hourly"] = result.spot_pricing.retail_price
-    row["num_alternatives"] = len(result.alternatives)
-    row["num_compatible_images"] = len(result.compatible_images)
+    if components.summary:
+        if result.availability:
+            row["available"] = result.availability.available
+            row["zones"] = ", ".join(result.availability.zones)
+            row["restrictions"] = ", ".join(result.availability.restrictions)
+        if result.quota:
+            row["quota_family"] = result.quota.family
+            row["quota_current"] = result.quota.current_usage
+            row["quota_limit"] = result.quota.limit
+            row["quota_available"] = result.quota.available
+            row["quota_usage_pct"] = round(result.quota.usage_percent, 1)
+        if result.pricing:
+            row["price_hourly"] = result.pricing.retail_price
+            row["price_currency"] = result.pricing.currency
+            row["price_type"] = result.pricing.price_type
+        if result.spot_pricing:
+            row["spot_price_hourly"] = result.spot_pricing.retail_price
+    if components.alternatives:
+        row["num_alternatives"] = len(result.alternatives)
+    if components.compatible_images:
+        row["num_compatible_images"] = len(result.compatible_images)
 
-    # Cost comparison summary
-    if result.cost_comparison:
+    if components.cost_comparison and result.cost_comparison:
         vm_cost = next(
             (e.monthly_cost for e in result.cost_comparison if e.service_name == "Virtual Machines"),
             None,
@@ -60,24 +69,55 @@ def _flatten_result(result: AssessmentResult) -> dict:
     return row
 
 
-def export_json(results: list[AssessmentResult], path: Path) -> None:
+def _filter_result_dict(
+    data: dict, components: ExportComponents
+) -> dict:
+    """Strip top-level keys from a dataclasses.asdict() dump per components."""
+    out = dict(data)
+    if not components.summary:
+        for k in ("availability", "quota", "pricing", "spot_pricing"):
+            out.pop(k, None)
+    if not components.alternatives:
+        out.pop("alternatives", None)
+    if not components.compatible_images:
+        out.pop("compatible_images", None)
+    if not components.cost_comparison:
+        out.pop("cost_comparison", None)
+    return out
+
+
+def export_json(
+    results: list[AssessmentResult],
+    path: Path,
+    components: ExportComponents | None = None,
+) -> None:
     """Export results to JSON."""
-    data = [asdict(r) for r in results]
+    components = components or ExportComponents.all()
+    data = [_filter_result_dict(asdict(r), components) for r in results]
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
-def export_json_string(results: list[AssessmentResult]) -> str:
+def export_json_string(
+    results: list[AssessmentResult],
+    components: ExportComponents | None = None,
+) -> str:
     """Export results to a JSON string."""
-    data = [asdict(r) for r in results]
+    components = components or ExportComponents.all()
+    data = [_filter_result_dict(asdict(r), components) for r in results]
     return json.dumps(data, indent=2, default=str)
 
 
-def export_csv(results: list[AssessmentResult], path: Path) -> None:
+def export_csv(
+    results: list[AssessmentResult],
+    path: Path,
+    components: ExportComponents | None = None,
+) -> None:
     """Export results to CSV."""
     if not results:
         path.write_text("")
         return
-    rows = [_flatten_result(r) for r in results]
+    components = components or ExportComponents.all()
+    rows = [_flatten_result(r, components) for r in results]
     fieldnames = list(rows[0].keys())
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -85,11 +125,15 @@ def export_csv(results: list[AssessmentResult], path: Path) -> None:
         writer.writerows(rows)
 
 
-def export_csv_string(results: list[AssessmentResult]) -> str:
+def export_csv_string(
+    results: list[AssessmentResult],
+    components: ExportComponents | None = None,
+) -> str:
     """Export results to a CSV string."""
     if not results:
         return ""
-    rows = [_flatten_result(r) for r in results]
+    components = components or ExportComponents.all()
+    rows = [_flatten_result(r, components) for r in results]
     fieldnames = list(rows[0].keys())
     output = StringIO()
     writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -98,26 +142,38 @@ def export_csv_string(results: list[AssessmentResult]) -> str:
     return output.getvalue()
 
 
-def export_excel(results: list[AssessmentResult], path: Path) -> None:
+def export_excel(
+    results: list[AssessmentResult],
+    path: Path,
+    components: ExportComponents | None = None,
+) -> None:
     """Export results to Excel with formatting."""
+    components = components or ExportComponents.all()
     wb = Workbook()
+    # Drop the default sheet; we'll add only the sheets the caller selected.
+    default = wb.active
+    if default is not None:
+        wb.remove(default)
 
-    # Summary sheet
-    ws = wb.active
-    ws.title = "Summary"
-    _write_summary_sheet(ws, results)
+    if components.summary:
+        ws = wb.create_sheet("Summary")
+        _write_summary_sheet(ws, results)
 
-    # Alternatives sheet
-    ws_alt = wb.create_sheet("Alternatives")
-    _write_alternatives_sheet(ws_alt, results)
+    if components.alternatives:
+        ws_alt = wb.create_sheet("Alternatives")
+        _write_alternatives_sheet(ws_alt, results)
 
-    # Images sheet
-    ws_img = wb.create_sheet("Compatible Images")
-    _write_images_sheet(ws_img, results)
+    if components.compatible_images:
+        ws_img = wb.create_sheet("Compatible Images")
+        _write_images_sheet(ws_img, results)
 
-    # Cost Comparison sheet
-    ws_cost = wb.create_sheet("Cost Comparison")
-    _write_cost_comparison_sheet(ws_cost, results)
+    if components.cost_comparison:
+        ws_cost = wb.create_sheet("Cost Comparison")
+        _write_cost_comparison_sheet(ws_cost, results)
+
+    if not wb.sheetnames:
+        # openpyxl requires at least one sheet to save the workbook.
+        wb.create_sheet("Empty")
 
     wb.save(str(path))
 

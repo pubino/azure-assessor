@@ -114,6 +114,27 @@ class ServiceCostEstimate:
 
 
 @dataclass
+class ExportComponents:
+    """Toggles selecting which sections of an AssessmentResult to export."""
+
+    summary: bool = True  # availability, quota, pricing summary fields
+    alternatives: bool = True
+    compatible_images: bool = True
+    cost_comparison: bool = True
+
+    @classmethod
+    def all(cls) -> ExportComponents:
+        return cls()
+
+    @classmethod
+    def none(cls) -> ExportComponents:
+        return cls(summary=False, alternatives=False, compatible_images=False, cost_comparison=False)
+
+    def any_selected(self) -> bool:
+        return any([self.summary, self.alternatives, self.compatible_images, self.cost_comparison])
+
+
+@dataclass
 class AssessmentResult:
     """Complete assessment result for export."""
 

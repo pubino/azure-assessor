@@ -18,6 +18,7 @@ from azure_assessor.export import (
 )
 from azure_assessor.models import (
     AssessmentResult,
+    ExportComponents,
     ImageInfo,
     PriceInfo,
     QuotaInfo,
@@ -240,3 +241,99 @@ class TestMultipleResults:
         reader = csv.DictReader(StringIO(output))
         rows = list(reader)
         assert len(rows) == 2
+
+
+class TestSelectiveExport:
+    """Selective export honors ExportComponents toggles across all formats."""
+
+    def test_csv_summary_only(self, rich_result):
+        comps = ExportComponents(
+            summary=True, alternatives=False, compatible_images=False, cost_comparison=False,
+        )
+        output = export_csv_string([rich_result], comps)
+        reader = csv.DictReader(StringIO(output))
+        row = next(iter(reader))
+        # Identifiers always present
+        assert row["target_sku"] == "Standard_D4s_v3"
+        # Summary fields present
+        assert "available" in row
+        assert "price_hourly" in row
+        # Disabled component fields absent
+        assert "num_alternatives" not in row
+        assert "num_compatible_images" not in row
+        assert "cheapest_service" not in row
+
+    def test_csv_cost_only(self, rich_result):
+        comps = ExportComponents(
+            summary=False, alternatives=False, compatible_images=False, cost_comparison=True,
+        )
+        output = export_csv_string([rich_result], comps)
+        reader = csv.DictReader(StringIO(output))
+        row = next(iter(reader))
+        assert row["target_sku"] == "Standard_D4s_v3"
+        assert "cheapest_service" in row
+        # Summary fields filtered out
+        assert "available" not in row
+        assert "price_hourly" not in row
+
+    def test_csv_all_off_keeps_identifiers(self, rich_result):
+        comps = ExportComponents.none()
+        output = export_csv_string([rich_result], comps)
+        reader = csv.DictReader(StringIO(output))
+        row = next(iter(reader))
+        assert set(row.keys()) == {"target_sku", "region", "timestamp"}
+
+    def test_json_filters_top_level_keys(self, rich_result):
+        comps = ExportComponents(
+            summary=True, alternatives=False, compatible_images=False, cost_comparison=False,
+        )
+        data = json.loads(export_json_string([rich_result], comps))
+        record = data[0]
+        # Identifiers + summary fields stay
+        assert record["target_sku"] == "Standard_D4s_v3"
+        assert record.get("availability") is not None
+        # Disabled lists/sections removed
+        assert "alternatives" not in record
+        assert "compatible_images" not in record
+        assert "cost_comparison" not in record
+
+    def test_json_cost_only_drops_summary(self, rich_result):
+        comps = ExportComponents(
+            summary=False, alternatives=False, compatible_images=False, cost_comparison=True,
+        )
+        data = json.loads(export_json_string([rich_result], comps))
+        record = data[0]
+        assert "availability" not in record
+        assert "quota" not in record
+        assert "pricing" not in record
+        assert "spot_pricing" not in record
+        assert "cost_comparison" in record
+
+    def test_excel_only_selected_sheets(self, rich_result, tmp_path: Path):
+        comps = ExportComponents(
+            summary=True, alternatives=False, compatible_images=False, cost_comparison=True,
+        )
+        path = tmp_path / "filtered.xlsx"
+        export_excel([rich_result], path, comps)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(path)
+        assert "Summary" in wb.sheetnames
+        assert "Cost Comparison" in wb.sheetnames
+        assert "Alternatives" not in wb.sheetnames
+        assert "Compatible Images" not in wb.sheetnames
+
+    def test_excel_all_off_creates_empty_workbook(self, rich_result, tmp_path: Path):
+        path = tmp_path / "empty.xlsx"
+        export_excel([rich_result], path, ExportComponents.none())
+
+        from openpyxl import load_workbook
+        wb = load_workbook(path)
+        # openpyxl requires at least one sheet
+        assert len(wb.sheetnames) >= 1
+
+    def test_default_components_match_legacy_behavior(self, rich_result):
+        """Calling without components yields the same output as before."""
+        legacy = export_csv_string([rich_result])
+        explicit = export_csv_string([rich_result], ExportComponents.all())
+        assert legacy == explicit

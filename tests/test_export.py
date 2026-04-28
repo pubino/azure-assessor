@@ -337,3 +337,128 @@ class TestSelectiveExport:
         legacy = export_csv_string([rich_result])
         explicit = export_csv_string([rich_result], ExportComponents.all())
         assert legacy == explicit
+
+
+@pytest.fixture
+def result_with_addons() -> AssessmentResult:
+    """Assessment result whose cost_comparison includes add-on rows."""
+    return AssessmentResult(
+        target_sku="Standard_D4s_v3",
+        region="eastus",
+        cost_comparison=[
+            ServiceCostEstimate(
+                service_name="Virtual Machines",
+                tier="Standard_D4s_v3",
+                monthly_cost=140.16,
+                hourly_cost=0.192,
+                vcpus=4, memory_gb=16.0,
+                spot_monthly=27.74,
+                notes=["Baseline VM cost"],
+            ),
+            ServiceCostEstimate(
+                service_name="Container Apps",
+                tier="Consumption",
+                monthly_cost=105.12,
+                hourly_cost=0.144,
+                vcpus=4, memory_gb=16.0,
+            ),
+            # Add-ons: each has monthly_cost lower than any compute row to
+            # prove the "cheapest" picker doesn't fall through to them.
+            ServiceCostEstimate(
+                service_name="Managed Disk",
+                tier="Premium SSD P10",
+                monthly_cost=19.71,
+                hourly_cost=0.027,
+                storage_gb=128,
+                notes=["Tier P10"],
+            ),
+            ServiceCostEstimate(
+                service_name="Azure Database for PostgreSQL",
+                tier="Burstable B1ms",
+                monthly_cost=24.82,
+                hourly_cost=0.034,
+                notes=["Burstable B1ms"],
+            ),
+        ],
+        timestamp="2026-04-28T12:00:00+00:00",
+    )
+
+
+class TestAddonReporting:
+    """Add-on rows are reported separately from compute alternatives."""
+
+    def test_csv_cheapest_excludes_addons(self, result_with_addons):
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(result_with_addons)
+        # Container Apps is the cheapest *compute* row; the $19.71 disk and
+        # $24.82 database are absolutely cheaper but must not be picked.
+        assert flat["cheapest_service"] == "Container Apps"
+        assert flat["cheapest_monthly"] == 105.12
+
+    def test_csv_emits_storage_columns(self, result_with_addons):
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(result_with_addons)
+        assert flat["storage_tier"] == "Premium SSD P10"
+        assert flat["storage_gb"] == 128
+        assert flat["storage_monthly"] == 19.71
+
+    def test_csv_emits_database_columns(self, result_with_addons):
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(result_with_addons)
+        assert flat["database_service"] == "Azure Database for PostgreSQL"
+        assert flat["database_tier"] == "Burstable B1ms"
+        assert flat["database_monthly"] == 24.82
+
+    def test_csv_total_monthly_estimate(self, result_with_addons):
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(result_with_addons)
+        # cheapest compute (Container Apps 105.12) + addons (19.71 + 24.82)
+        assert flat["addons_monthly_total"] == round(19.71 + 24.82, 2)
+        assert flat["total_monthly_estimate"] == round(105.12 + 19.71 + 24.82, 2)
+
+    def test_csv_no_addon_columns_when_none(self, rich_result):
+        """rich_result has no add-ons, so add-on columns must be absent."""
+        from azure_assessor.export import _flatten_result
+        flat = _flatten_result(rich_result)
+        assert "storage_tier" not in flat
+        assert "database_service" not in flat
+        assert "addons_monthly_total" not in flat
+        assert "total_monthly_estimate" not in flat
+
+    def test_csv_dictwriter_handles_mixed_rows(self, rich_result, result_with_addons):
+        """Rows with differing keys (one with add-ons, one without) all serialize."""
+        output = export_csv_string([rich_result, result_with_addons])
+        reader = csv.DictReader(StringIO(output))
+        rows = list(reader)
+        assert len(rows) == 2
+        # Header includes the add-on columns from the second row
+        assert "storage_monthly" in reader.fieldnames
+        assert "database_service" in reader.fieldnames
+        # First row leaves the add-on cells blank, second row populates them
+        assert rows[0]["storage_monthly"] == ""
+        assert rows[1]["storage_monthly"] == "19.71"
+
+    def test_excel_appends_total_row(self, result_with_addons, tmp_path: Path):
+        path = tmp_path / "with_total.xlsx"
+        export_excel([result_with_addons], path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(str(path))
+        ws = wb["Cost Comparison"]
+        # 1 header + 4 cost rows + 1 TOTAL row
+        last_row = 6
+        assert ws.cell(row=last_row, column=3).value == "TOTAL"
+        # Column 8 = Monthly Cost
+        expected_total = round(105.12 + 19.71 + 24.82, 2)
+        assert ws.cell(row=last_row, column=8).value == expected_total
+
+    def test_excel_no_total_row_without_addons(self, rich_result, tmp_path: Path):
+        path = tmp_path / "no_total.xlsx"
+        export_excel([rich_result], path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(str(path))
+        ws = wb["Cost Comparison"]
+        # rich_result has VM + Container Apps only — no TOTAL row should appear
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            assert row[2] != "TOTAL"

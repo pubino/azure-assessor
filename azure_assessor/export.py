@@ -11,7 +11,23 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from azure_assessor.models import AssessmentResult, ExportComponents
+from azure_assessor.models import AssessmentResult, ExportComponents, ServiceCostEstimate
+
+# Service names that represent compute alternatives (mutually-exclusive deploy
+# targets). Anything else in cost_comparison is treated as an additive add-on
+# (Managed Disk, managed databases) and surfaced separately in reporting.
+COMPUTE_SERVICE_NAMES = frozenset(
+    {"Virtual Machines", "Container Apps", "AKS", "App Service"}
+)
+
+
+def _split_cost_rows(
+    estimates: list[ServiceCostEstimate],
+) -> tuple[list[ServiceCostEstimate], list[ServiceCostEstimate]]:
+    """Partition cost_comparison into (compute, add-ons) by service_name."""
+    compute = [e for e in estimates if e.service_name in COMPUTE_SERVICE_NAMES]
+    addons = [e for e in estimates if e.service_name not in COMPUTE_SERVICE_NAMES]
+    return compute, addons
 
 
 def _flatten_result(
@@ -51,20 +67,46 @@ def _flatten_result(
         row["num_compatible_images"] = len(result.compatible_images)
 
     if components.cost_comparison and result.cost_comparison:
-        vm_cost = next(
-            (e.monthly_cost for e in result.cost_comparison if e.service_name == "Virtual Machines"),
-            None,
-        )
-        cheapest = min(result.cost_comparison, key=lambda e: e.monthly_cost)
-        row["cheapest_service"] = cheapest.service_name
-        row["cheapest_tier"] = cheapest.tier
-        row["cheapest_monthly"] = cheapest.monthly_cost
-        if vm_cost and vm_cost > 0 and cheapest.service_name != "Virtual Machines":
-            row["savings_vs_vm_pct"] = round(
-                ((vm_cost - cheapest.monthly_cost) / vm_cost) * 100, 1
+        compute, addons = _split_cost_rows(result.cost_comparison)
+
+        cheapest_compute_monthly: float | None = None
+        if compute:
+            cheapest = min(compute, key=lambda e: e.monthly_cost)
+            cheapest_compute_monthly = cheapest.monthly_cost
+            row["cheapest_service"] = cheapest.service_name
+            row["cheapest_tier"] = cheapest.tier
+            row["cheapest_monthly"] = cheapest.monthly_cost
+            vm_cost = next(
+                (e.monthly_cost for e in compute if e.service_name == "Virtual Machines"),
+                None,
             )
-        else:
-            row["savings_vs_vm_pct"] = 0.0
+            if vm_cost and vm_cost > 0 and cheapest.service_name != "Virtual Machines":
+                row["savings_vs_vm_pct"] = round(
+                    ((vm_cost - cheapest.monthly_cost) / vm_cost) * 100, 1
+                )
+            else:
+                row["savings_vs_vm_pct"] = 0.0
+
+        # Add-on columns (only emitted when the corresponding add-on is present)
+        disk = next((a for a in addons if a.service_name == "Managed Disk"), None)
+        if disk:
+            row["storage_tier"] = disk.tier
+            row["storage_gb"] = disk.storage_gb
+            row["storage_monthly"] = disk.monthly_cost
+
+        database = next((a for a in addons if a.service_name != "Managed Disk"), None)
+        if database:
+            row["database_service"] = database.service_name
+            row["database_tier"] = database.tier
+            row["database_monthly"] = database.monthly_cost
+
+        if addons:
+            addons_total = round(sum(a.monthly_cost for a in addons), 2)
+            row["addons_monthly_total"] = addons_total
+            if cheapest_compute_monthly is not None:
+                row["total_monthly_estimate"] = round(
+                    cheapest_compute_monthly + addons_total, 2
+                )
 
     return row
 
@@ -107,6 +149,18 @@ def export_json_string(
     return json.dumps(data, indent=2, default=str)
 
 
+def _csv_fieldnames(rows: list[dict]) -> list[str]:
+    """Union of keys across rows, preserving first-seen order."""
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for k in row.keys():
+            if k not in seen:
+                seen.add(k)
+                fieldnames.append(k)
+    return fieldnames
+
+
 def export_csv(
     results: list[AssessmentResult],
     path: Path,
@@ -118,7 +172,7 @@ def export_csv(
         return
     components = components or ExportComponents.all()
     rows = [_flatten_result(r, components) for r in results]
-    fieldnames = list(rows[0].keys())
+    fieldnames = _csv_fieldnames(rows)
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -134,7 +188,7 @@ def export_csv_string(
         return ""
     components = components or ExportComponents.all()
     rows = [_flatten_result(r, components) for r in results]
-    fieldnames = list(rows[0].keys())
+    fieldnames = _csv_fieldnames(rows)
     output = StringIO()
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -293,6 +347,9 @@ def _write_cost_comparison_sheet(ws, results: list[AssessmentResult]) -> None:
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
+    total_font = Font(bold=True)
+    total_fill = PatternFill(start_color="E7E0F0", end_color="E7E0F0", fill_type="solid")
+
     row_idx = 2
     for result in results:
         vm_monthly = next(
@@ -315,6 +372,32 @@ def _write_cost_comparison_sheet(ws, results: list[AssessmentResult]) -> None:
             else:
                 ws.cell(row=row_idx, column=10, value="baseline" if est.service_name == "Virtual Machines" else "")
             ws.cell(row=row_idx, column=11, value="; ".join(est.notes))
+            row_idx += 1
+
+        # TOTAL row: cheapest compute + sum of add-ons. Only emitted when a
+        # result actually has both a compute baseline and at least one add-on,
+        # since otherwise the value duplicates an existing row.
+        compute, addons = _split_cost_rows(result.cost_comparison)
+        if compute and addons:
+            cheapest = min(compute, key=lambda e: e.monthly_cost)
+            addons_total = sum(a.monthly_cost for a in addons)
+            total_monthly = round(cheapest.monthly_cost + addons_total, 2)
+            cells = [
+                ws.cell(row=row_idx, column=1, value=result.target_sku),
+                ws.cell(row=row_idx, column=2, value=result.region),
+                ws.cell(row=row_idx, column=3, value="TOTAL"),
+                ws.cell(row=row_idx, column=4, value=f"{cheapest.service_name} ({cheapest.tier}) + {len(addons)} add-on(s)"),
+                ws.cell(row=row_idx, column=5, value=""),
+                ws.cell(row=row_idx, column=6, value=""),
+                ws.cell(row=row_idx, column=7, value=""),
+                ws.cell(row=row_idx, column=8, value=total_monthly),
+                ws.cell(row=row_idx, column=9, value=""),
+                ws.cell(row=row_idx, column=10, value=""),
+                ws.cell(row=row_idx, column=11, value=f"Cheapest compute + add-ons (${addons_total:,.2f})"),
+            ]
+            for cell in cells:
+                cell.font = total_font
+                cell.fill = total_fill
             row_idx += 1
 
     # Auto-width columns
